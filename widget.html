@@ -1,0 +1,255 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Settings, History, Trash2, Check, 
+  Plus, Loader2, Cloud, Flame, X, 
+  Wallet, Coins, Crown, Sparkles, AlertCircle
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, doc, setDoc, collection, onSnapshot, 
+  addDoc, deleteDoc, updateDoc, increment, getDoc 
+} from 'firebase/firestore';
+
+// --- Инициализация Firebase ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'easyfin-stable';
+
+export default function App() {
+  const [view, setView] = useState('home');
+  const [user, setUser] = useState(null);
+  const [authError, setAuthError] = useState(null);
+  
+  // Данные пользователя
+  const [amount, setAmount] = useState(0);
+  const [balance, setBalance] = useState(0);
+  const [coins, setCoins] = useState(0);
+  const [maxLimit, setMaxLimit] = useState(10000);
+  const [expenses, setExpenses] = useState([]);
+  const [activeTitle, setActiveTitle] = useState('');
+  
+  const [isSyncing, setIsSyncing] = useState(true);
+  const [showSuccess, setShowSuccess] = useState(false);
+
+  const categories = [
+    { id: 1, name: 'Еда', color: 'bg-emerald-500' },
+    { id: 2, name: 'Транспорт', color: 'bg-blue-500' },
+    { id: 3, name: 'Дом', color: 'bg-orange-500' },
+    { id: 4, name: 'Спорт', color: 'bg-purple-500' },
+    { id: 5, name: 'Шоппинг', color: 'bg-pink-500' },
+    { id: 6, name: 'Связь', color: 'bg-slate-500' },
+  ];
+
+  // 1. Авторизация
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth Error:", err);
+        setAuthError("Ошибка входа. Проверьте, включен ли Anonymous Auth в Firebase.");
+      }
+    };
+    initAuth();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  // 2. Слушатели Firestore
+  useEffect(() => {
+    if (!user) return;
+    setIsSyncing(true);
+
+    // Подписка на траты
+    const qExpenses = collection(db, 'artifacts', appId, 'users', user.uid, 'expenses');
+    const unsubExp = onSnapshot(qExpenses, (snap) => {
+      setExpenses(snap.docs.map(d => ({ ...d.data(), id: d.id })));
+      setIsSyncing(false);
+    }, (err) => {
+      console.error("Firestore Expenses Error:", err);
+      setIsSyncing(false);
+    });
+
+    // Подписка на настройки/баланс
+    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config');
+    const unsubSet = onSnapshot(docRef, (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        setBalance(data.balance || 0);
+        setCoins(data.coins || 0);
+        setMaxLimit(data.maxLimit || 10000);
+        setActiveTitle(data.activeTitle || '');
+      } else {
+        // Создаем начальный профиль, если его нет
+        setDoc(docRef, { balance: 0, coins: 0, maxLimit: 10000, activeTitle: 'Новичок' });
+      }
+    });
+
+    return () => { unsubExp(); unsubSet(); };
+  }, [user]);
+
+  // Стрик (дни без пропусков)
+  const streak = useMemo(() => {
+    if (expenses.length === 0) return 0;
+    const dates = [...new Set(expenses.map(e => new Date(e.date).toDateString()))]
+      .map(d => new Date(d).setHours(0,0,0,0))
+      .sort((a,b) => b - a);
+    
+    let count = 0;
+    let current = new Date().setHours(0,0,0,0);
+    if (!dates.includes(current)) current -= 86400000;
+
+    for (let i = 0; i < 365; i++) {
+      if (dates.includes(current)) {
+        count++;
+        current -= 86400000;
+      } else break;
+    }
+    return count;
+  }, [expenses]);
+
+  const handleAddExpense = async (catId) => {
+    if (!user || amount <= 0) return;
+    try {
+      const expensesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'expenses');
+      const settingsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config');
+      
+      await addDoc(expensesRef, { 
+        amount, 
+        categoryId: catId, 
+        date: new Date().toISOString() 
+      });
+      
+      await updateDoc(settingsRef, { 
+        balance: increment(-amount) 
+      });
+
+      setAmount(0);
+      setShowSuccess(true);
+      setTimeout(() => setShowSuccess(false), 1000);
+    } catch (err) {
+      alert("Не удалось сохранить: проверьте правила Firestore.");
+    }
+  };
+
+  if (authError) {
+    return (
+      <div className="h-screen bg-slate-950 flex flex-col items-center justify-center p-10 text-center">
+        <AlertCircle size={48} className="text-red-500 mb-4" />
+        <h1 className="text-xl font-bold text-white mb-2">Ошибка доступа</h1>
+        <p className="text-slate-400 text-sm mb-6">{authError}</p>
+        <button onClick={() => window.location.reload()} className="bg-slate-800 px-6 py-2 rounded-xl">Попробовать снова</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-[100dvh] bg-slate-950 text-white flex flex-col p-6 overflow-hidden select-none">
+      
+      {/* Header */}
+      <div className="flex justify-between items-center mb-6 pt-4">
+        <div className="flex items-center gap-2 bg-yellow-500/10 px-3 py-1.5 rounded-full border border-yellow-500/20">
+          <Coins size={14} className="text-yellow-500" />
+          <span className="text-yellow-500 font-bold text-xs">{coins}</span>
+        </div>
+        {activeTitle && (
+          <div className="bg-indigo-500/10 border border-indigo-500/20 px-3 py-1.5 rounded-full flex items-center gap-1.5">
+            <Crown size={12} className="text-indigo-400" />
+            <span className="text-indigo-300 text-[10px] font-black uppercase tracking-wider">{activeTitle}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Widget */}
+      <div className="bg-slate-900 border border-white/5 p-5 rounded-[2.5rem] mb-8 flex justify-between items-center">
+        <div>
+          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.2em] mb-1">Ваш Баланс</p>
+          <p className="text-2xl font-black">{balance.toLocaleString()} <span className="text-slate-600 text-sm">с</span></p>
+        </div>
+        <div className="text-right">
+          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.2em] mb-1">Стрик</p>
+          <p className="text-xl font-black text-orange-500 flex items-center gap-1">
+            {streak} <Flame size={18} fill="currentColor" />
+          </p>
+        </div>
+      </div>
+
+      {/* Main Input Area */}
+      <div className="flex-1 flex flex-col items-center justify-center relative">
+        {showSuccess && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-emerald-500/10 backdrop-blur-sm rounded-full animate-in zoom-in duration-300">
+            <Check size={60} className="text-emerald-500" strokeWidth={3} />
+          </div>
+        )}
+        
+        <div className="text-center mb-8">
+          <p className="text-[10px] text-slate-600 font-black uppercase tracking-widest mb-2">Расход сейчас</p>
+          <h2 className="text-7xl font-black tracking-tighter tabular-nums">
+            {amount} <span className="text-2xl text-slate-800">с</span>
+          </h2>
+        </div>
+
+        <input 
+          type="range" 
+          min="0" 
+          max={maxLimit} 
+          step="10"
+          value={amount}
+          onChange={(e) => setAmount(Number(e.target.value))}
+          className="w-full h-3 bg-slate-800 rounded-full appearance-none cursor-pointer accent-blue-500 mb-12"
+        />
+
+        <div className="grid grid-cols-3 gap-4 w-full">
+          {categories.map(cat => (
+            <button 
+              key={cat.id} 
+              onClick={() => handleAddExpense(cat.id)}
+              disabled={amount === 0}
+              className={`h-24 rounded-3xl flex flex-col items-center justify-center transition-all active:scale-90 ${amount === 0 ? 'opacity-20 grayscale' : 'bg-slate-900 border border-white/5 shadow-xl'}`}
+            >
+              <div className={`w-3 h-3 rounded-full mb-3 ${cat.color} shadow-lg shadow-current/50`}></div>
+              <span className="text-[10px] font-black uppercase text-slate-400">{cat.name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Navigation */}
+      <div className="fixed bottom-8 left-8 right-8 bg-slate-900/90 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] p-2 flex justify-around shadow-2xl">
+        <button onClick={() => setView('history')} className={`p-4 rounded-3xl ${view === 'history' ? 'text-blue-400 bg-white/5' : 'text-slate-600'}`}><History size={24}/></button>
+        <button onClick={() => setView('home')} className={`p-4 rounded-3xl ${view === 'home' ? 'text-blue-400 bg-white/5' : 'text-slate-600'}`}><Plus size={24}/></button>
+        <button onClick={() => setView('settings')} className={`p-4 rounded-3xl ${view === 'settings' ? 'text-blue-400 bg-white/5' : 'text-slate-600'}`}><Settings size={24}/></button>
+      </div>
+
+      {/* History View Overlay */}
+      {view === 'history' && (
+        <div className="fixed inset-0 z-[100] bg-slate-950 p-6 pt-16 overflow-y-auto pb-32">
+          <div className="flex justify-between items-center mb-8">
+            <h2 className="text-3xl font-black">История</h2>
+            <button onClick={() => setView('home')} className="bg-slate-900 p-2 rounded-xl"><X /></button>
+          </div>
+          <div className="space-y-3">
+            {expenses.sort((a,b) => new Date(b.date) - new Date(a.date)).map(e => (
+              <div key={e.id} className="bg-slate-900 p-5 rounded-3xl flex justify-between items-center border border-white/5">
+                <div>
+                  <p className="font-bold text-lg">{e.amount} с</p>
+                  <p className="text-[10px] text-slate-500 uppercase font-black">{new Date(e.date).toLocaleDateString()}</p>
+                </div>
+                <button onClick={() => deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'expenses', e.id))} className="text-red-500/30 p-2"><Trash2 size={18}/></button>
+              </div>
+            ))}
+            {expenses.length === 0 && <p className="text-center text-slate-600 mt-20 italic">Трат еще нет</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
